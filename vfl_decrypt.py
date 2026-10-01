@@ -168,15 +168,18 @@ def job_list(target, out_dir):
 			yield src, out_dir / rel.with_name(rel.stem + DST_SUFFIX)
 
 
-def print_vfl_header(out):
+def parse_vfl_size_address(size, address):
+	return (int(size.hex()), int.from_bytes(address, byteorder='big'))
+
+
+def parse_vfl_decrypted_header(out):
 	if len(out) < HEADER_SIZE:
-		raise ValueError('VFL header is shorter than the 100-byte header')
+		raise ValueError(' VFL header is shorter than the 100-byte header')
 
 	magic = out[:0x18].decode('ascii', 'replace')
-	print('Magic: {}'.format(magic))
-	print('0018-001C ignored bytes: {}'.format(
-		' '.join('{:02X}'.format(b) for b in out[0x18:0x1D])
-	))
+	bytes_magic = ' '.join('{:02X}'.format(b) for b in out[:0x18])
+	print('    00-17   Magic: {}'.format(magic))
+	print('    00-17   Bytes: {}'.format(bytes_magic))
 
 	phone_code = out[0x1D]
 	phone_name = {
@@ -186,8 +189,10 @@ def print_vfl_header(out):
 		0x04: 'V70',
 		0x05: 'T720',
 		0x06: 'C33x',
-	}.get(phone_code, 'Unknown')
-	print('001D Phone type: {:02X} ({})'.format(phone_code, phone_name))
+	}.get(phone_code)
+	if phone_name is None:
+		raise ValueError('Unknown phone type 0x{:02X} at 001D'.format(phone_code))
+	print('    1D-1D   Phone: {:02X} ({})'.format(phone_code, phone_name))
 
 	file_code = out[0x1E]
 	file_name = {
@@ -195,45 +200,60 @@ def print_vfl_header(out):
 		0x02: 'Special flash (repair/reflash)',
 		0x03: 'KJava',
 		0x04: 'Language package only',
-	}.get(file_code, 'Unknown')
-	print('001E File type: {:02X} ({})'.format(file_code, file_name))
-	print('001F-0023 ignored bytes: {}'.format(
-		' '.join('{:02X}'.format(b) for b in out[0x1F:0x24])
-	))
+	}.get(file_code)
+	if file_name is None:
+		raise ValueError('Unknown file type 0x{:02X} at 001E'.format(file_code))
+	print('    1E-1E   FType: {:02X} ({})'.format(file_code, file_name))
 
 	branch_code = out[0x61]
 	branch_name = {
 		0x01: 'Neptune',
 		0xFF: 'Patriot',
-	}.get(branch_code, 'Unknown')
-	print('0061 Branch flag: {:02X} ({})'.format(branch_code, branch_name))
+	}.get(branch_code)
+	if branch_name is None:
+		raise ValueError('Unknown branch flag 0x{:02X} at 0061'.format(branch_code))
+	print('    61-61  Branch: {:02X} ({})'.format(branch_code, branch_name))
 
-	for idx in range(5):
-		base = 0x24 + idx * 0x0C
-		prefix = out[base:base + 4]
-		size = out[base + 4:base + 8]
-		addr = out[base + 8:base + 12]
-		print('CG{}: {} | {} | {}'.format(
-			idx,
-			' '.join('{:02X}'.format(b) for b in prefix),
-			' '.join('{:02X}'.format(b) for b in size),
-			' '.join('{:02X}'.format(b) for b in addr),
-		))
+	print('    18-1C Ignored: {}'.format(
+		' '.join('{:02X}'.format(b) for b in out[0x18:0x1D])
+	))
+
+	print('    1F-23 Ignored: {}'.format(
+		' '.join('{:02X}'.format(b) for b in out[0x1F:0x24])
+	))
+
+	CGs = []
 
 	if branch_code == 0x01:
 		base = 0x60
-		prefix = out[base:base + 4]
+		prefix = out[base + 1:base + 4]
 		size = out[base + 4:base + 8]
 		addr = out[base + 8:base + 12]
-		print('RAMDLD: {} | {} | {}'.format(
+		print('    {:02X}-{:02X}     RDL: {} | {} | {}'.format(
+			base + 1, base + 0x0C,
 			' '.join('{:02X}'.format(b) for b in prefix),
 			' '.join('{:02X}'.format(b) for b in size),
 			' '.join('{:02X}'.format(b) for b in addr),
 		))
+		CGs.append(parse_vfl_size_address(size, addr))
 	elif branch_code == 0xFF:
-		print('RAMDLD size: 00 16 38 40')
-		print('RAMDLD address: 11 01 00 00')
+		print('    00-00     RDL: 01 FF FF | 00 16 38 40 | 11 01 00 00')
+		CGs.append(parse_vfl_size_address(b'\x00\x16\x38\x40', b'\x11\x01\x00\x00'))
 
+	for idx in range(5):
+		base = 0x24 + idx * 0x0C
+		prefix = out[base + 1:base + 4]
+		size = out[base + 4:base + 8]
+		addr = out[base + 8:base + 12]
+		print('    {:02X}-{:02X}     CG{}: {} | {} | {}'.format(
+			base + 1, base + 0x0C, idx,
+			' '.join('{:02X}'.format(b) for b in prefix),
+			' '.join('{:02X}'.format(b) for b in size),
+			' '.join('{:02X}'.format(b) for b in addr),
+		))
+		CGs.append(parse_vfl_size_address(size, addr))
+
+	return CGs
 
 def main(argv):
 	if not 2 <= len(argv) <= 3:
@@ -248,19 +268,25 @@ def main(argv):
 		return 2
 
 	done = failed = 0
-	for src, dst in job_list(target, out_dir):
+	jobs = list(job_list(target, out_dir))
+	total = len(jobs)
+	for index, (src, dst) in enumerate(jobs, 1):
 		try:
+			print('{:03d}/{:03d} Decrypting...'.format(index, total))
+			print('    => {}'.format(src))
 			data = src.read_bytes()
 			out = decrypt_vfl(data)
+			parse_vfl_decrypted_header(out)
 			dst.parent.mkdir(parents=True, exist_ok=True)
 			dst.write_bytes(out)
-			print_vfl_header(out)
+			print('    => {}\n'.format(dst))
 		except (OSError, ValueError) as e:
 			failed += 1
-			sys.stderr.write('FAIL {}: {}\n'.format(src, e))
+			sys.stderr.write('    FAIL {}: {}\n'.format(src, e))
+			if 'Unknown' in str(e):
+				return 1
 			continue
 		done += 1
-		print('Decrypted: {} => {}'.format(src, dst))
 
 	if target.is_dir():
 		print('Done: {} decrypted, {} failed'.format(done, failed))
