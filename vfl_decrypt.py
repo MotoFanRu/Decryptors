@@ -9,6 +9,72 @@ Usage:
 	vfl_decrypt.py <file.vfl>            decrypt next to the source as <name>.decoded.bin
 	vfl_decrypt.py <dir> [output_dir]    decrypt every *.vfl under <dir> into output_dir
 	                                     (default: ./decrypted), keeping the directory tree
+
+VFL header format:
+
+	0000-0017  56 69 63 74 6F 72 47 53 4D 2E 6E 65 74 20 46 6C 61 73 68 20 46 69 6C 65
+				"VictorGSM.net Flash File"
+
+	0018-001C  FF 01 00 FF FF
+				unknown / ignored by this parser
+
+	001D       02
+				01 = V66
+				02 = V60
+				03 = T280
+				04 = V70
+				05 = T720
+				06 = C33x
+
+	001E       01
+				01 = Full flash
+				02 = Special flash (repair/reflash)
+				03 = KJava
+				04 = Language package only
+
+	001F-0023  04 01 01 FF FF
+				unknown / ignored by this parser
+
+	0024-002F  CG0 record
+				00 01 FF FF | 00 00 02 00 | 10 01 00 00
+				^^^^^^^^^^^   ^^^^^^^^^^^   ^^^^^^^^^^^^
+				record prefix    size          address
+
+	0030-003B  CG1 record
+				00 01 FF FF | 03 00 73 20 | 10 01 00 C8
+
+	003C-0047  CG2 record
+				00 00 00 00 | 00 00 00 00 | 00 00 00 00
+				absent / empty often
+
+	0048-0053  CG3 record
+				00 01 FF FF | 00 01 20 72 | 10 00 80 00
+
+	0054-005F  CG4 record
+				00 01 FF FF | 00 20 72 48 | 10 2E E4 20
+
+	0061       01
+				01 - Neptune branch
+				FF - Patriot branch
+
+	0060-006B  Extended / RAMDLD metadata record (only if Neptune branch!)
+				00 01 FF FF | 00 07 65 44 | 11 00 00 00
+				^^^^^^^^^^^   ^^^^^^^^^^^   ^^^^^^^^^^^^
+				prefix       RAMDLD size    RAMDLD address
+
+	0064-...    29 C3 4B 32 ...
+				RAMDLD data/code begins here for Patriot (header is 100 bytes)
+
+	0096-...    29 C3 4B 32 ...
+				RAMDLD data/code begins here for Neptune (header is 150 bytes)
+
+	Next binary chunks for:
+		RAMDLD
+		CG0
+		CG1
+		CG2
+		CG3
+		CG4
 '''
 
 import hashlib
@@ -102,6 +168,73 @@ def job_list(target, out_dir):
 			yield src, out_dir / rel.with_name(rel.stem + DST_SUFFIX)
 
 
+def print_vfl_header(out):
+	if len(out) < HEADER_SIZE:
+		raise ValueError('VFL header is shorter than the 100-byte header')
+
+	magic = out[:0x18].decode('ascii', 'replace')
+	print('Magic: {}'.format(magic))
+	print('0018-001C ignored bytes: {}'.format(
+		' '.join('{:02X}'.format(b) for b in out[0x18:0x1D])
+	))
+
+	phone_code = out[0x1D]
+	phone_name = {
+		0x01: 'V66',
+		0x02: 'V60',
+		0x03: 'T280',
+		0x04: 'V70',
+		0x05: 'T720',
+		0x06: 'C33x',
+	}.get(phone_code, 'Unknown')
+	print('001D Phone type: {:02X} ({})'.format(phone_code, phone_name))
+
+	file_code = out[0x1E]
+	file_name = {
+		0x01: 'Full flash',
+		0x02: 'Special flash (repair/reflash)',
+		0x03: 'KJava',
+		0x04: 'Language package only',
+	}.get(file_code, 'Unknown')
+	print('001E File type: {:02X} ({})'.format(file_code, file_name))
+	print('001F-0023 ignored bytes: {}'.format(
+		' '.join('{:02X}'.format(b) for b in out[0x1F:0x24])
+	))
+
+	branch_code = out[0x61]
+	branch_name = {
+		0x01: 'Neptune',
+		0xFF: 'Patriot',
+	}.get(branch_code, 'Unknown')
+	print('0061 Branch flag: {:02X} ({})'.format(branch_code, branch_name))
+
+	for idx in range(5):
+		base = 0x24 + idx * 0x0C
+		prefix = out[base:base + 4]
+		size = out[base + 4:base + 8]
+		addr = out[base + 8:base + 12]
+		print('CG{}: {} | {} | {}'.format(
+			idx,
+			' '.join('{:02X}'.format(b) for b in prefix),
+			' '.join('{:02X}'.format(b) for b in size),
+			' '.join('{:02X}'.format(b) for b in addr),
+		))
+
+	if branch_code == 0x01:
+		base = 0x60
+		prefix = out[base:base + 4]
+		size = out[base + 4:base + 8]
+		addr = out[base + 8:base + 12]
+		print('RAMDLD: {} | {} | {}'.format(
+			' '.join('{:02X}'.format(b) for b in prefix),
+			' '.join('{:02X}'.format(b) for b in size),
+			' '.join('{:02X}'.format(b) for b in addr),
+		))
+	elif branch_code == 0xFF:
+		print('RAMDLD size: 00 16 38 40')
+		print('RAMDLD address: 11 01 00 00')
+
+
 def main(argv):
 	if not 2 <= len(argv) <= 3:
 		sys.stderr.write(__doc__)
@@ -121,6 +254,7 @@ def main(argv):
 			out = decrypt_vfl(data)
 			dst.parent.mkdir(parents=True, exist_ok=True)
 			dst.write_bytes(out)
+			print_vfl_header(out)
 		except (OSError, ValueError) as e:
 			failed += 1
 			sys.stderr.write('FAIL {}: {}\n'.format(src, e))
