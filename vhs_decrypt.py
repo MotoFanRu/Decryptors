@@ -31,7 +31,7 @@ KEY_PHRASE = (
 	b'version 3.1.2 Email: info@victorgsm.net Web: www.victorgsm.net'
 )
 SRC_SUFFIX = '.vhs'
-DST_SUFFIX = '_decrypted.hs'
+DST_SUFFIX = '.dec.hs'
 DEFAULT_OUT_DIR = 'decrypted'
 
 

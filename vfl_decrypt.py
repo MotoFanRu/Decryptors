@@ -30,7 +30,7 @@ PASSPHRASE = (
 )
 
 SRC_SUFFIX = '.vfl'
-DST_SUFFIX = '.decoded.bin'
+DST_SUFFIX = '.dec.bin'
 DEFAULT_OUT_DIR = 'decrypted'
 
 HEADER_SIZE = 0x64
